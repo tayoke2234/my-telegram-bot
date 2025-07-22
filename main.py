@@ -1,14 +1,17 @@
-# Telegram Temp Mail Bot (Final Version - Fixed for Database Locking Error)
+# Telegram Temp Mail Bot (Final Version - Corrected Missing Imports)
 # Deployed on Render.com, kept alive by UptimeRobot
 
 import logging
 import asyncio
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date # Fixed: Added 'date' import
 import os
 import random
 import string
 import re
+import imaplib # Fixed: Added 'imaplib' import
+import email # Fixed: Added 'email' import
+from email.header import decode_header # Fixed: Added 'decode_header' import
 from flask import Flask
 from threading import Thread
 
@@ -19,7 +22,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "Bot is alive and running with database lock fix!"
+    return "Bot is alive and running with all fixes!"
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
@@ -51,11 +54,9 @@ except KeyError as e:
 DB_PATH = '/data/tempmail.db' if os.path.exists('/data') else 'tempmail.db'
 
 def get_db_conn():
-    """Creates a new database connection."""
-    return sqlite3.connect(DB_PATH, check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    return sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
 
 def init_db():
-    """Initializes the database schema."""
     with get_db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -103,6 +104,7 @@ async def create_email_entry(user_id: int, username: str, expires_at: datetime |
     try:
         with get_db_conn() as conn:
             cursor = conn.cursor()
+            # Fixed: Using date.today() which is now imported
             cursor.execute("INSERT INTO addresses (user_id, username, full_address, creation_date, expires_at) VALUES (?, ?, ?, ?, ?)",
                            (user_id, username, full_address, date.today(), expires_at))
             conn.commit()
@@ -289,6 +291,7 @@ def auto_delete_expired_addresses():
 
 def fetch_and_process_emails(application: Application):
     try:
+        # Fixed: Using imaplib which is now imported
         mail = imaplib.IMAP4_SSL(IMAP_SERVER); mail.login(CATCH_ALL_EMAIL, CATCH_ALL_PASSWORD); mail.select("inbox")
         _, messages = mail.search(None, "UNSEEN"); email_ids = messages[0].split()
         if not email_ids: mail.logout(); return
