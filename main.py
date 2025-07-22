@@ -1,4 +1,4 @@
-# Telegram Temp Mail Bot (Final Version - Fixed for Render.com Permission Error v2)
+# Telegram Temp Mail Bot (Final Version - Corrected for Render.com Free Tier)
 # Deployed on Render.com, kept alive by UptimeRobot
 
 import logging
@@ -47,13 +47,12 @@ except KeyError as e:
     print(f"!!! FATAL ERROR: Environment variable {e} is not set on Render.com !!!")
     exit()
 
-# --- DATABASE SETUP (FIXED FOR RENDER v2) ---
-# Render's free tier provides a persistent disk at '/data'.
-# We will create our database file directly in this directory.
-DB_PATH = '/data/tempmail.db'
+# --- DATABASE SETUP (FINAL FIX FOR RENDER) ---
+# Store the database in the same directory as the script.
+# This works on Render's free tier. Data will be lost on new deploys, but not on restarts.
+DB_PATH = 'tempmail.db'
 
 def init_db():
-    # The directory /data is provided by Render, so we don't need to create it.
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
     cursor = conn.cursor()
     cursor.execute('''
