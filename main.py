@@ -1,4 +1,4 @@
-# Telegram Temp Mail Bot (Final Version - Corrected UNSEEN Bug)
+# Telegram Temp Mail Bot (Definitive Final Version - All Features & Bug Fixes)
 # Deployed on Render.com, kept alive by UptimeRobot
 
 import logging
@@ -18,11 +18,11 @@ from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
-# --- FLASK WEB SERVER (for UptimeRobot on Render) ---
+# --- FLASK WEB SERVER ---
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "Bot is alive and running with all fixes!"
+    return "Bot is alive and running with definitive fixes!"
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
@@ -31,13 +31,10 @@ def start_web_server_in_thread():
     t.start()
 
 # --- LOGGING SETUP ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- CONFIGURATION (from Render Environment Variables) ---
+# --- CONFIGURATION ---
 try:
     BOT_TOKEN = os.environ['BOT_TOKEN']
     YOUR_DOMAIN = os.environ['YOUR_DOMAIN']
@@ -45,13 +42,14 @@ try:
     CATCH_ALL_PASSWORD = os.environ['CATCH_ALL_PASSWORD']
     ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))
     IMAP_SERVER = "imap.gmail.com"
-    DAILY_LIMIT = 10
+    DAILY_LIMIT = 5 # Set daily limit to 5
 except KeyError as e:
     print(f"!!! FATAL ERROR: Environment variable {e} is not set on Render.com !!!")
     exit()
 
 # --- DATABASE SETUP ---
 DB_PATH = '/data/tempmail.db' if os.path.exists('/data') else 'tempmail.db'
+db_lock = asyncio.Lock()
 
 def get_db_conn():
     return sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
@@ -68,8 +66,7 @@ def init_db():
         ''')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS emails (
-                id INTEGER PRIMARY KEY, address_id INTEGER NOT NULL,
-                message_id TEXT UNIQUE, -- To prevent duplicate processing
+                id INTEGER PRIMARY KEY, address_id INTEGER NOT NULL, message_id TEXT UNIQUE,
                 from_address TEXT NOT NULL, subject TEXT NOT NULL, body TEXT,
                 received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE CASCADE
@@ -98,65 +95,85 @@ def format_remaining_time(expires_at: datetime) -> str:
 
 # --- BOT COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Bot မှကြိုဆိုပါတယ်။ Command များအတွက် 'Menu' ခလုတ်ကိုနှိပ်ပါ။")
+    await update.message.reply_text("👋 Bot မှကြိုဆိုပါတယ်။ Command များအတွက် 'Menu' ခလုတ် သို့မဟုတ် `/help` ကိုနှိပ်ပါ။")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+    **ℹ️ အကူအညီ နှင့် အသုံးပြုပုံ**
+
+    **Email ဖန်တီးခြင်း:**
+    - `/new`: ကျပန်းနာမည်ဖြင့် သက်တမ်းမကုန်သော email ဖန်တီးရန်။
+    - `/new <name>`: ကိုယ်ပိုင်နာမည်ဖြင့် သက်တမ်းမကုန်သော email ဖန်တီးရန်။
+    - `/newtimed`: ကျပန်းနာမည်ဖြင့် ၁ နာရီ သက်တမ်းရှိ email ဖန်တီးရန်။
+    - `/newtimed <name> <time>`: ကိုယ်ပိုင်နာမည်နှင့် အချိန်ဖြင့် email ဖန်တီးရန် (ဥပမာ: `30m`, `2h`, `1d`)။
+
+    **Email စီမံခန့်ခွဲခြင်း:**
+    - `/myemails`: သင်၏ email များကို ကြည့်ရှုရန်။
+    - `/delete <name>`: သင်၏ email ကို ဖျက်ရန်။
+    """
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def create_email_entry(user_id: int, username: str, expires_at: datetime | None):
     full_address = f"{username}@{YOUR_DOMAIN}"
-    try:
-        with get_db_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO addresses (user_id, username, full_address, creation_date, expires_at) VALUES (?, ?, ?, ?, ?)",
-                           (user_id, username, full_address, date.today(), expires_at))
-            conn.commit()
-        return full_address, None
-    except sqlite3.IntegrityError:
-        return None, f"⚠️ `{username}` ဆိုတဲ့လိပ်စာက ရှိပြီးသားဖြစ်နေပါသည်။"
-    except Exception as e:
-        logger.error(f"Error in create_email_entry: {e}")
-        return None, "❌ အမှားအယွင်းတစ်ခု ဖြစ်ပွားပါသည်။"
+    async with db_lock:
+        try:
+            with get_db_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM addresses WHERE user_id = ? AND creation_date = ?", (user_id, date.today()))
+                if cursor.fetchone()[0] >= DAILY_LIMIT:
+                    return None, f"⚠️ တစ်နေ့တာအတွက် သတ်မှတ်ထားတဲ့ အီးမေးလ် {DAILY_LIMIT} ခု ပြည့်သွားပါပြီ။"
+                
+                cursor.execute("INSERT INTO addresses (user_id, username, full_address, creation_date, expires_at) VALUES (?, ?, ?, ?, ?)",
+                               (user_id, username, full_address, date.today(), expires_at))
+                conn.commit()
+            return full_address, None
+        except sqlite3.IntegrityError:
+            return None, f"⚠️ `{username}` ဆိုတဲ့လိပ်စာက ရှိပြီးသားဖြစ်နေပါသည်။"
+        except Exception as e:
+            logger.error(f"Error in create_email_entry: {e}")
+            return None, "❌ အမှားအယွင်းတစ်ခု ဖြစ်ပွားပါသည်။"
 
-async def new_random_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def new_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-    full_address, error = await create_email_entry(user_id, username, None)
-    if error:
-        await update.message.reply_text(error, parse_mode='Markdown')
+    if not context.args:
+        username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
     else:
-        await update.message.reply_text(f"✅ ကျပန်းလိပ်စာအသစ် (သက်တမ်းမကုန်):\n\n`{full_address}`", parse_mode='Markdown')
+        username = context.args[0].lower()
+        if not username.isalnum():
+            await update.message.reply_text("❌ Username ပုံစံမှားယွင်းနေပါသည်။ (a-z, 0-9 သာ)"); return
+    
+    full_address, error = await create_email_entry(user_id, username, None)
+    if error: await update.message.reply_text(error, parse_mode='Markdown')
+    else: await update.message.reply_text(f"✅ သက်တမ်းမကုန်သောလိပ်စာ:\n\n`{full_address}`", parse_mode='Markdown')
 
 async def new_timed_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not context.args or len(context.args) not in [1, 2]:
-        await update.message.reply_text("ℹ️ အသုံးပြုပုံ: `/newtimed <name> [time]`\nဥပမာ: `/newtimed test 1h`")
-        return
+    username, time_str, expires_at_delta = None, "1h", timedelta(hours=1)
 
-    username = context.args[0].lower()
-    if not username.isalnum():
-        await update.message.reply_text("❌ Username ပုံစံမှားယွင်းနေပါသည်။ (a-z, 0-9 သာ)"); return
-
-    expires_at, time_str = None, None
-    if len(context.args) == 2:
-        time_str = context.args[1]
-        duration = parse_duration(time_str)
-        if duration:
-            expires_at = datetime.now() + duration
-        else:
-            await update.message.reply_text("❌ အချိန်သတ်မှတ်ပုံစံမှားယွင်းနေပါသည်။ (ဥပမာ: 30m, 2h, 1d)"); return
-    
-    full_address, error = await create_email_entry(user_id, username, expires_at)
-    if error:
-        await update.message.reply_text(error, parse_mode='Markdown')
+    if not context.args:
+        username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
     else:
-        expiry_info = f"\n\n🕒 ဤလိပ်စာသည် {time_str} ကြာလျှင် အလိုအလျောက်ပျက်သွားပါမည်။" if expires_at else ""
-        await update.message.reply_text(f"✅ အောင်မြင်စွာဖန်တီးပြီးပါပြီ:\n\n`{full_address}`{expiry_info}", parse_mode='Markdown')
+        username = context.args[0].lower()
+        if not username.isalnum():
+            await update.message.reply_text("❌ Username ပုံစံမှားယွင်းနေပါသည်။ (a-z, 0-9 သာ)"); return
+        if len(context.args) > 1:
+            time_str = context.args[1]
+            duration = parse_duration(time_str)
+            if duration: expires_at_delta = duration
+            else: await update.message.reply_text("❌ အချိန်သတ်မှတ်ပုံစံမှားယွင်းနေပါသည်။ (ဥပမာ: 30m, 2h, 1d)"); return
+    
+    expires_at = datetime.now() + expires_at_delta
+    full_address, error = await create_email_entry(user_id, username, expires_at)
+    if error: await update.message.reply_text(error, parse_mode='Markdown')
+    else: await update.message.reply_text(f"✅ အောင်မြင်စွာဖန်တီးပြီးပါပြီ:\n\n`{full_address}`\n\n🕒 ဤလိပ်စာသည် {time_str} ကြာလျှင် အလိုအလျောက်ပျက်သွားပါမည်။", parse_mode='Markdown')
 
 async def my_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_db_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT username, full_address, expires_at FROM addresses WHERE user_id = ?", (update.effective_user.id,))
-        addresses = cursor.fetchall()
-    if not addresses:
-        await update.message.reply_text("သင်ဖန်တီးထားတဲ့ အီးမေးလ်လိပ်စာ မရှိသေးပါ။"); return
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT username, full_address, expires_at FROM addresses WHERE user_id = ?", (update.effective_user.id,))
+            addresses = cursor.fetchall()
+    if not addresses: await update.message.reply_text("သင်ဖန်တီးထားတဲ့ အီးမေးလ်လိပ်စာ မရှိသေးပါ။"); return
 
     keyboard = []
     for username, full_address, expires_at_str in addresses:
@@ -165,29 +182,73 @@ async def my_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"inbox:{username}:0")])
     await update.message.reply_text('📬 သင်၏ အီးမေးလ်လိပ်စာများ (Inbox ကြည့်ရန်နှိပ်ပါ):', reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def delete_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("ℹ️ အသုံးပြုပုံ: `/delete <name>`\nဥပမာ: `/delete mytest`"); return
+    
+    username = context.args[0].lower()
+    user_id = update.effective_user.id
+    
+    # Check if the user actually owns this email
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM addresses WHERE user_id = ? AND username = ?", (user_id, username))
+            if not cursor.fetchone():
+                await update.message.reply_text(f"⚠️ `{username}` ဆိုသော email ကို သင်ပိုင်ဆိုင်ခြင်းမရှိပါ။"); return
+
+    keyboard = [[
+        InlineKeyboardButton("✅ Yes, delete", callback_data=f"user_delete_execute:{username}"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete")
+    ]]
+    await update.message.reply_text(f"❓ `{username}@{YOUR_DOMAIN}` ကို အပြီးတိုင်ဖျက်ရန် သေချာပါသလား?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
 # --- INLINE BUTTON HANDLER & OTHER FUNCTIONS ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data.split(':')
     action = data[0]
+
     if action == "inbox": await show_inbox(query, username=data[1], page=int(data[2]))
     elif action == "read_full": await show_full_email(query, email_id=int(data[1]))
+    elif action == "user_delete_execute": await execute_user_delete(query, username=data[1])
+    elif action == "admin_inbox": await show_inbox(query, username=data[1], page=int(data[2]), is_admin=True)
+    elif action == "admin_delete_confirm": await confirm_admin_delete(query, username=data[1])
+    elif action == "admin_delete_execute": await execute_admin_delete(query, username=data[1])
+    elif action == "cancel_delete": await query.edit_message_text("🗑️ ဖျက်ခြင်းကို ပယ်ဖျက်လိုက်ပါသည်။")
 
-async def show_inbox(query, username, page):
+async def execute_user_delete(query: Update, username: str):
     user_id = query.from_user.id
-    with get_db_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM addresses WHERE user_id = ? AND username = ?", (user_id, username))
-        address_row = cursor.fetchone()
-        if not address_row: await query.edit_message_text("❌ Error: Email address not found."); return
-        
-        address_id, emails_per_page = address_row[0], 5
-        offset = page * emails_per_page
-        cursor.execute("SELECT id, from_address, subject, received_at FROM emails WHERE address_id = ? ORDER BY received_at DESC LIMIT ? OFFSET ?", (address_id, emails_per_page, offset))
-        emails = cursor.fetchall()
-        cursor.execute("SELECT COUNT(*) FROM emails WHERE address_id = ?", (address_id,))
-        total_emails = cursor.fetchone()[0]
+    full_address = f"{username}@{YOUR_DOMAIN}"
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM addresses WHERE user_id = ? AND username = ?", (user_id, username))
+            rowcount = cursor.rowcount
+            conn.commit()
+    if rowcount > 0: await query.edit_message_text(f"🗑️ `{full_address}` ကို အောင်မြင်စွာဖျက်ပြီးပါပြီ။", parse_mode='Markdown')
+    else: await query.edit_message_text(f"⚠️ `{full_address}` ကို ရှာမတွေ့ပါ။", parse_mode='Markdown')
+
+# (Other functions like show_inbox, show_full_email remain here)
+async def show_inbox(query, username, page, is_admin=False):
+    user_id = query.from_user.id
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            if is_admin and user_id == ADMIN_ID:
+                cursor.execute("SELECT id FROM addresses WHERE username = ?", (username,))
+            else:
+                cursor.execute("SELECT id FROM addresses WHERE user_id = ? AND username = ?", (user_id, username))
+            address_row = cursor.fetchone()
+            if not address_row: await query.edit_message_text("❌ Error: Email address not found."); return
+            
+            address_id, emails_per_page = address_row[0], 5
+            offset = page * emails_per_page
+            cursor.execute("SELECT id, from_address, subject, received_at FROM emails WHERE address_id = ? ORDER BY received_at DESC LIMIT ? OFFSET ?", (address_id, emails_per_page, offset))
+            emails = cursor.fetchall()
+            cursor.execute("SELECT COUNT(*) FROM emails WHERE address_id = ?", (address_id,))
+            total_emails = cursor.fetchone()[0]
 
     if total_emails == 0: await query.edit_message_text(f"📥 `{username}@{YOUR_DOMAIN}` ၏ inbox ထဲမှာ email မရှိသေးပါ။", parse_mode='Markdown'); return
 
@@ -198,8 +259,9 @@ async def show_inbox(query, username, page):
         keyboard.append([InlineKeyboardButton(f"📧 အပြည့်အစုံဖတ်ရန် ({subject[:10]}...)", callback_data=f"read_full:{email_id}")])
 
     pagination_buttons = []
-    if page > 0: pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"inbox:{username}:{page-1}"))
-    if (page + 1) * emails_per_page < total_emails: pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"inbox:{username}:{page+1}"))
+    page_callback_prefix = "admin_inbox" if is_admin else "inbox"
+    if page > 0: pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"{page_callback_prefix}:{username}:{page-1}"))
+    if (page + 1) * emails_per_page < total_emails: pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"{page_callback_prefix}:{username}:{page+1}"))
     if pagination_buttons: keyboard.append(pagination_buttons)
 
     try:
@@ -208,26 +270,92 @@ async def show_inbox(query, username, page):
         if "Message is not modified" not in str(e): logger.error(f"Error editing message for inbox: {e}")
 
 async def show_full_email(query, email_id):
-    with get_db_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT from_address, subject, body, received_at FROM emails WHERE id = ?", (email_id,))
-        email_data = cursor.fetchone()
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT from_address, subject, body, received_at FROM emails WHERE id = ?", (email_id,))
+            email_data = cursor.fetchone()
     if not email_data: await query.message.reply_text("❌ Email ကိုရှာမတွေ့ပါ။"); return
     from_addr, subject, body, received_at = email_data
     full_email_text = f"--- Email Details ---\n**From:** {from_addr}\n**Subject:** {subject}\n**Received:** {received_at}\n------------------\n{body}"
     await query.message.reply_text(full_email_text, parse_mode='Markdown')
+
 
 # --- ADMIN COMMANDS ---
 async def admin_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, admin_function):
     if update.effective_user.id != ADMIN_ID: await update.message.reply_text("❌ Admin command ဖြစ်ပါသည်။"); return
     await admin_function(update, context)
 
+async def viewall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT username, full_address, user_id FROM addresses ORDER BY id DESC")
+            all_addresses = cursor.fetchall()
+    if not all_addresses: await update.message.reply_text("ℹ️ Bot တွင် ဖန်တီးထားသော email လိပ်စာများ မရှိသေးပါ။"); return
+    
+    message = "📬 **Email လိပ်စာများအားလုံး:**\n\n"
+    keyboard = []
+    for username, full_address, user_id in all_addresses[:20]:
+        message += f"- `{full_address}` (User: `{user_id}`)\n"
+        keyboard.append([
+            InlineKeyboardButton(f"📥 Inbox: {username}", callback_data=f"admin_inbox:{username}:0"),
+            InlineKeyboardButton(f"🗑️ Delete", callback_data=f"admin_delete_confirm:{username}")
+        ])
+    await update.message.reply_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def confirm_admin_delete(query: Update, username: str):
+    keyboard = [[
+        InlineKeyboardButton("✅ Yes, delete", callback_data=f"admin_delete_execute:{username}"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete")
+    ]]
+    await query.edit_message_text(text=f"❓ `{username}@{YOUR_DOMAIN}` ကို အပြီးတိုင်ဖျက်ရန် သေချာပါသလား?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def execute_admin_delete(query: Update, username: str):
+    full_address = f"{username}@{YOUR_DOMAIN}"
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM addresses WHERE full_address = ?", (full_address,))
+            rowcount = cursor.rowcount
+            conn.commit()
+    if rowcount > 0: await query.edit_message_text(f"🗑️ `{full_address}` ကို အောင်မြင်စွာဖျက်ပြီးပါပြီ။", parse_mode='Markdown')
+    else: await query.edit_message_text(f"⚠️ `{full_address}` ကို ရှာမတွေ့ပါ။", parse_mode='Markdown')
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("ℹ️ အသုံးပြုပုံ: `/broadcast <message>`"); return
+    
+    broadcast_text = " ".join(context.args)
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT user_id FROM addresses")
+            users = cursor.fetchall()
+    
+    if not users: await update.message.reply_text("ℹ️ Message ပေးပို့ရန် User မရှိသေးပါ။"); return
+    
+    sent_count = 0
+    failed_count = 0
+    for (user_id,) in users:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=f"📢 **Admin Announcement**\n\n{broadcast_text}", parse_mode='Markdown')
+            sent_count += 1
+        except Exception as e:
+            logger.warning(f"Failed to send broadcast to {user_id}: {e}")
+            failed_count += 1
+        await asyncio.sleep(0.1) # Avoid hitting rate limits
+    
+    await update.message.reply_text(f"✅ Broadcast complete!\n- Sent to: {sent_count} users\n- Failed for: {failed_count} users")
+
+# (Other admin commands like stats, storage, etc. remain here)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_db_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM addresses"); total_addrs = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM addresses"); total_users = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM emails"); total_emails = cursor.fetchone()[0]
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM addresses"); total_addrs = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(DISTINCT user_id) FROM addresses"); total_users = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM emails"); total_emails = cursor.fetchone()[0]
     stats_text = f"📊 **Bot Statistics**\n- စုစုပေါင်း အသုံးပြုသူ: {total_users}\n- စုစုပေါင်း လိပ်စာ: {total_addrs}\n- စုစုပေါင်း လက်ခံရရှိသော အီးမေးလ်: {total_emails}"
     await update.message.reply_text(stats_text)
 
@@ -238,32 +366,12 @@ async def storage_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"💽 Database storage: {size_mb:.2f} MB")
     except FileNotFoundError: await update.message.reply_text("❌ Database file ကိုရှာမတွေ့ပါ။")
 
-async def adelete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or len(context.args) != 1: await update.message.reply_text("ℹ️ အသုံးပြုပုံ: `/adelete <full_email_address>`"); return
-    email_to_delete = context.args[0]
-    with get_db_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM addresses WHERE full_address = ?", (email_to_delete,))
-        rowcount = cursor.rowcount
-        conn.commit()
-    if rowcount > 0: await update.message.reply_text(f"🗑️ `{email_to_delete}` ကို အောင်မြင်စွာဖျက်ပြီးပါပြီ။", parse_mode='Markdown')
-    else: await update.message.reply_text(f"⚠️ `{email_to_delete}` ကို ရှာမတွေ့ပါ။", parse_mode='Markdown')
-
-async def finduser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or len(context.args) != 1: await update.message.reply_text("ℹ️ အသုံးပြုပုံ: `/finduser <full_email_address>`"); return
-    email_to_find = context.args[0]
-    with get_db_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM addresses WHERE full_address = ?", (email_to_find,))
-        result = cursor.fetchone()
-    if result: await update.message.reply_text(f"👤 `{email_to_find}` ကို ဖန်တီးသူ၏ User ID မှာ:\n`{result[0]}`", parse_mode='Markdown')
-    else: await update.message.reply_text(f"⚠️ `{email_to_find}` ကို ရှာမတွေ့ပါ။", parse_mode='Markdown')
-
 async def listusers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_db_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT user_id FROM addresses")
-        users = cursor.fetchall()
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT user_id FROM addresses")
+            users = cursor.fetchall()
     if not users: await update.message.reply_text("ℹ️ Bot ကိုအသုံးပြုနေသော User မရှိသေးပါ။"); return
     user_list = "\n".join([f"- `{user[0]}`" for user in users])
     await update.message.reply_text(f"👥 **Bot အသုံးပြုသူများ စာရင်း:**\n{user_list}", parse_mode='Markdown')
@@ -272,11 +380,12 @@ async def deleteuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text("ℹ️ အသုံးပြုပုံ: `/deleteuser <user_id>`"); return
     user_id_to_delete = int(context.args[0])
-    with get_db_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM addresses WHERE user_id = ?", (user_id_to_delete,))
-        rowcount = cursor.rowcount
-        conn.commit()
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM addresses WHERE user_id = ?", (user_id_to_delete,))
+            rowcount = cursor.rowcount
+            conn.commit()
     if rowcount > 0:
         await update.message.reply_text(f"🗑️ User ID `{user_id_to_delete}` နှင့် သက်ဆိုင်သော data အားလုံးကို အောင်မြင်စွာဖျက်ပြီးပါပြီ။", parse_mode='Markdown')
     else: await update.message.reply_text(f"⚠️ User ID `{user_id_to_delete}` ကို ရှာမတွေ့ပါ။", parse_mode='Markdown')
@@ -292,39 +401,35 @@ def auto_delete_expired_addresses():
 def fetch_and_process_emails(application: Application):
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER); mail.login(CATCH_ALL_EMAIL, CATCH_ALL_PASSWORD); mail.select("inbox")
-        # Fixed: Search for ALL emails, not just UNSEEN
-        status, messages = mail.search(None, "ALL")
-        if status != 'OK':
-            logger.error("IMAP search failed.")
-            mail.logout()
-            return
-        
+        yesterday = date.today() - timedelta(days=1)
+        search_criteria = f'(SENTSINCE {yesterday.strftime("%d-%b-%Y")})'
+        status, messages = mail.search(None, search_criteria)
+        if status != 'OK': mail.logout(); return
         email_ids = messages[0].split()
         if not email_ids: mail.logout(); return
         
-        logger.info(f"Found {len(email_ids)} total emails. Checking for new ones.")
+        logger.info(f"Found {len(email_ids)} emails since yesterday. Checking for new ones.")
+        asyncio.run(process_emails_in_db(application, mail, email_ids))
+        mail.logout()
+    except Exception as e: logger.error(f"IMAP Error: {e}")
+
+async def process_emails_in_db(application, mail, email_ids):
+    async with db_lock:
         with get_db_conn() as conn:
             cursor = conn.cursor()
-            for email_id in reversed(email_ids[-20:]): # Check latest 20 emails for performance
+            for email_id in reversed(email_ids):
                 try:
-                    _, msg_data = mail.fetch(email_id, "(RFC822)")
-                    msg = email.message_from_bytes(msg_data[0][1])
-                    
+                    _, msg_data = mail.fetch(email_id, "(RFC822)"); msg = email.message_from_bytes(msg_data[0][1])
                     message_id_header = msg.get("Message-ID")
                     if not message_id_header: continue
-
-                    # Check if this email has already been processed
                     cursor.execute("SELECT id FROM emails WHERE message_id = ?", (message_id_header,))
-                    if cursor.fetchone():
-                        continue # Skip already processed email
+                    if cursor.fetchone(): continue
 
                     to_address = email.utils.parseaddr(msg.get("To"))[1] or email.utils.parseaddr(msg.get("Delivered-To"))[1]
                     if not to_address or YOUR_DOMAIN not in to_address: continue
-                    
                     username = to_address.split('@')[0].lower()
                     cursor.execute("SELECT id, user_id FROM addresses WHERE username = ?", (username,))
                     address_row = cursor.fetchone()
-
                     if address_row:
                         address_id, user_id = address_row
                         subject, _ = decode_header(msg["Subject"])[0]; from_address, _ = decode_header(msg.get("From"))[0]
@@ -344,8 +449,6 @@ def fetch_and_process_emails(application: Application):
                         notification = f"🔔 *Email အသစ်ရောက်ရှိ* `{to_address}`\n\n`/myemails` ကိုသုံးပြီး inbox ထဲဝင်ကြည့်နိုင်ပါပြီ။"
                         asyncio.run_coroutine_threadsafe(application.bot.send_message(chat_id=user_id, text=notification, parse_mode='Markdown'), application.loop)
                 except Exception as e: logger.error(f"Error processing a single email: {e}")
-        mail.logout()
-    except Exception as e: logger.error(f"IMAP Error: {e}")
 
 async def background_tasks_loop(application: Application):
     logger.info("Background tasks loop started.")
@@ -357,9 +460,11 @@ async def background_tasks_loop(application: Application):
 async def post_init(application: Application):
     user_commands = [
         BotCommand("start", "Bot ကိုစတင်ရန်"),
-        BotCommand("new", "ကျပန်း email အသစ် (သက်တမ်းမကုန်) ဖန်တီးရန်"),
+        BotCommand("new", "သက်တမ်းမကုန်သော email ဖန်တီးရန် (ဥပမာ: /new myname)"),
         BotCommand("newtimed", "အချိန်ကန့်သတ်ဖြင့် email ဖန်တီးရန် (ဥပမာ: /newtimed test 1h)"),
         BotCommand("myemails", "သင်၏ email များကိုကြည့်ရှုရန်"),
+        BotCommand("delete", "သင်၏ email ကိုဖျက်ရန် (ဥပမာ: /delete myname)"),
+        BotCommand("help", "အကူအညီကြည့်ရန်"),
     ]
     await application.bot.set_my_commands(user_commands)
     
@@ -369,8 +474,8 @@ async def post_init(application: Application):
             BotCommand("storage", "💽 Database အရွယ်အစား ကြည့်ရန်"),
             BotCommand("listusers", "👥 User အားလုံးကို ကြည့်ရန်"),
             BotCommand("deleteuser", "🚫 User တစ်ဦးကိုဖျက်ရန် (ဥပမာ: /deleteuser ID)"),
-            BotCommand("adelete", "🗑️ User email ကိုဖျက်ရန် (ဥပမာ: /adelete name@domain.com)"),
-            BotCommand("finduser", "👤 Email ဖြင့် User ID ရှာရန်"),
+            BotCommand("viewall", "📧 Email အားလုံးကို ကြည့်ရှု/စီမံရန်"),
+            BotCommand("broadcast", "📢 ကြေညာချက် ပေးပို့ရန်"),
         ]
         await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
     
@@ -385,16 +490,18 @@ def main():
 
     # Command Handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("new", new_random_email))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("new", new_email))
     application.add_handler(CommandHandler("newtimed", new_timed_email))
     application.add_handler(CommandHandler("myemails", my_emails))
+    application.add_handler(CommandHandler("delete", delete_email))
     # Admin Handlers
     application.add_handler(CommandHandler("stats", lambda u, c: admin_command_wrapper(u, c, stats_command)))
     application.add_handler(CommandHandler("storage", lambda u, c: admin_command_wrapper(u, c, storage_command)))
-    application.add_handler(CommandHandler("adelete", lambda u, c: admin_command_wrapper(u, c, adelete_command)))
-    application.add_handler(CommandHandler("finduser", lambda u, c: admin_command_wrapper(u, c, finduser_command)))
     application.add_handler(CommandHandler("listusers", lambda u, c: admin_command_wrapper(u, c, listusers_command)))
     application.add_handler(CommandHandler("deleteuser", lambda u, c: admin_command_wrapper(u, c, deleteuser_command)))
+    application.add_handler(CommandHandler("viewall", lambda u, c: admin_command_wrapper(u, c, viewall_command)))
+    application.add_handler(CommandHandler("broadcast", lambda u, c: admin_command_wrapper(u, c, broadcast_command)))
     
     application.add_handler(CallbackQueryHandler(button_handler))
 
