@@ -1,17 +1,17 @@
-# Telegram Temp Mail Bot (Final Version - Corrected Missing Imports)
+# Telegram Temp Mail Bot (Final Version - Corrected UNSEEN Bug)
 # Deployed on Render.com, kept alive by UptimeRobot
 
 import logging
 import asyncio
 import sqlite3
-from datetime import datetime, timedelta, date # Fixed: Added 'date' import
+from datetime import datetime, timedelta, date
 import os
 import random
 import string
 import re
-import imaplib # Fixed: Added 'imaplib' import
-import email # Fixed: Added 'email' import
-from email.header import decode_header # Fixed: Added 'decode_header' import
+import imaplib
+import email
+from email.header import decode_header
 from flask import Flask
 from threading import Thread
 
@@ -69,6 +69,7 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS emails (
                 id INTEGER PRIMARY KEY, address_id INTEGER NOT NULL,
+                message_id TEXT UNIQUE, -- To prevent duplicate processing
                 from_address TEXT NOT NULL, subject TEXT NOT NULL, body TEXT,
                 received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE CASCADE
@@ -104,7 +105,6 @@ async def create_email_entry(user_id: int, username: str, expires_at: datetime |
     try:
         with get_db_conn() as conn:
             cursor = conn.cursor()
-            # Fixed: Using date.today() which is now imported
             cursor.execute("INSERT INTO addresses (user_id, username, full_address, creation_date, expires_at) VALUES (?, ?, ?, ?, ?)",
                            (user_id, username, full_address, date.today(), expires_at))
             conn.commit()
@@ -291,21 +291,40 @@ def auto_delete_expired_addresses():
 
 def fetch_and_process_emails(application: Application):
     try:
-        # Fixed: Using imaplib which is now imported
         mail = imaplib.IMAP4_SSL(IMAP_SERVER); mail.login(CATCH_ALL_EMAIL, CATCH_ALL_PASSWORD); mail.select("inbox")
-        _, messages = mail.search(None, "UNSEEN"); email_ids = messages[0].split()
+        # Fixed: Search for ALL emails, not just UNSEEN
+        status, messages = mail.search(None, "ALL")
+        if status != 'OK':
+            logger.error("IMAP search failed.")
+            mail.logout()
+            return
+        
+        email_ids = messages[0].split()
         if not email_ids: mail.logout(); return
-        logger.info(f"Found {len(email_ids)} new emails.")
+        
+        logger.info(f"Found {len(email_ids)} total emails. Checking for new ones.")
         with get_db_conn() as conn:
             cursor = conn.cursor()
-            for email_id in email_ids:
+            for email_id in reversed(email_ids[-20:]): # Check latest 20 emails for performance
                 try:
-                    _, msg_data = mail.fetch(email_id, "(RFC822)"); msg = email.message_from_bytes(msg_data[0][1])
+                    _, msg_data = mail.fetch(email_id, "(RFC822)")
+                    msg = email.message_from_bytes(msg_data[0][1])
+                    
+                    message_id_header = msg.get("Message-ID")
+                    if not message_id_header: continue
+
+                    # Check if this email has already been processed
+                    cursor.execute("SELECT id FROM emails WHERE message_id = ?", (message_id_header,))
+                    if cursor.fetchone():
+                        continue # Skip already processed email
+
                     to_address = email.utils.parseaddr(msg.get("To"))[1] or email.utils.parseaddr(msg.get("Delivered-To"))[1]
                     if not to_address or YOUR_DOMAIN not in to_address: continue
+                    
                     username = to_address.split('@')[0].lower()
                     cursor.execute("SELECT id, user_id FROM addresses WHERE username = ?", (username,))
                     address_row = cursor.fetchone()
+
                     if address_row:
                         address_id, user_id = address_row
                         subject, _ = decode_header(msg["Subject"])[0]; from_address, _ = decode_header(msg.get("From"))[0]
@@ -316,11 +335,15 @@ def fetch_and_process_emails(application: Application):
                             for part in msg.walk():
                                 if part.get_content_type() == "text/plain": body = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', 'ignore'); break
                         else: body = msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8', 'ignore')
-                        cursor.execute("INSERT INTO emails (address_id, from_address, subject, body, received_at) VALUES (?, ?, ?, ?, ?)", (address_id, from_address, subject, body, datetime.now())); conn.commit()
+                        
+                        cursor.execute("INSERT INTO emails (address_id, message_id, from_address, subject, body, received_at) VALUES (?, ?, ?, ?, ?, ?)", 
+                                       (address_id, message_id_header, from_address, subject, body, datetime.now())); 
+                        conn.commit()
+                        
+                        logger.info(f"Processed new email for {to_address}")
                         notification = f"🔔 *Email အသစ်ရောက်ရှိ* `{to_address}`\n\n`/myemails` ကိုသုံးပြီး inbox ထဲဝင်ကြည့်နိုင်ပါပြီ။"
                         asyncio.run_coroutine_threadsafe(application.bot.send_message(chat_id=user_id, text=notification, parse_mode='Markdown'), application.loop)
-                    mail.store(email_id, '+FLAGS', '\\Seen')
-                except Exception as e: logger.error(f"Error processing email ID {email_id}: {e}")
+                except Exception as e: logger.error(f"Error processing a single email: {e}")
         mail.logout()
     except Exception as e: logger.error(f"IMAP Error: {e}")
 
@@ -355,7 +378,7 @@ async def post_init(application: Application):
 
 # --- MAIN FUNCTION ---
 def main():
-    init_db() # Ensure database is initialized at startup
+    init_db()
     start_web_server_in_thread()
     logger.info("Web server running in a thread.")
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
