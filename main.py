@@ -1,4 +1,4 @@
-# Telegram Temp Mail Bot (Final Version with Full User Management)
+# Telegram Temp Mail Bot (Final Version - Fixed for Render.com Permission Error)
 # Deployed on Render.com, kept alive by UptimeRobot
 
 import logging
@@ -19,14 +19,10 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 app = Flask(__name__)
 @app.route('/')
 def home():
-    # UptimeRobot can see this message to confirm the bot is alive.
     return "Bot is alive and running on Render!"
-
 def run_web_server():
-    # The port is set by Render, so we use the PORT environment variable.
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
-
 def start_web_server_in_thread():
     t = Thread(target=run_web_server)
     t.start()
@@ -48,15 +44,18 @@ try:
     IMAP_SERVER = "imap.gmail.com"
     DAILY_LIMIT = 10
 except KeyError as e:
-    # This error will show in the Render logs if a variable is missing.
     print(f"!!! FATAL ERROR: Environment variable {e} is not set on Render.com !!!")
     exit()
 
-# --- DATABASE SETUP ---
-# Render provides ephemeral storage. For persistent data, a managed database is needed.
-# The database will be created in a specific folder that Render preserves between restarts.
-DB_PATH = os.path.join('/var/data', 'tempmail.db')
-os.makedirs('/var/data', exist_ok=True)
+# --- DATABASE SETUP (FIXED FOR RENDER) ---
+# Render's free tier provides a persistent disk at '/data'.
+# We will create our database file in this directory.
+RENDER_DATA_DIR = '/data'
+DB_PATH = os.path.join(RENDER_DATA_DIR, 'tempmail.db')
+
+# Ensure the data directory exists
+os.makedirs(RENDER_DATA_DIR, exist_ok=True)
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
@@ -81,7 +80,7 @@ def init_db():
 
 conn = init_db()
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (No changes) ---
 def parse_duration(time_str: str) -> timedelta | None:
     match = re.match(r'(\d+)([mhd])', time_str.lower())
     if not match: return None
@@ -100,12 +99,11 @@ def format_remaining_time(expires_at: datetime) -> str:
     if m > 0: return f"({m}m left)"
     return "(<1m left)"
 
-# --- BOT COMMANDS ---
+# --- BOT COMMANDS (No changes) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Bot မှကြိုဆိုပါတယ်။ Command များအတွက် 'Menu' ခလုတ်ကိုနှိပ်ပါ။")
 
 async def create_email_entry(user_id: int, username: str, expires_at: datetime | None):
-    """Helper function to create an email address in the database."""
     full_address = f"{username}@{YOUR_DOMAIN}"
     try:
         cursor = conn.cursor()
@@ -120,7 +118,6 @@ async def create_email_entry(user_id: int, username: str, expires_at: datetime |
         return None, "❌ အမှားအယွင်းတစ်ခု ဖြစ်ပွားပါသည်။"
 
 async def new_random_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles /new command for creating a random, permanent email."""
     user_id = update.effective_user.id
     username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
     full_address, error = await create_email_entry(user_id, username, None)
@@ -130,7 +127,6 @@ async def new_random_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ ကျပန်းလိပ်စာအသစ် (သက်တမ်းမကုန်):\n\n`{full_address}`", parse_mode='Markdown')
 
 async def new_timed_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles /newtimed <name> [time] command."""
     user_id = update.effective_user.id
     if not context.args or len(context.args) not in [1, 2]:
         await update.message.reply_text("ℹ️ အသုံးပြုပုံ: `/newtimed <name> [time]`\nဥပမာ: `/newtimed test 1h`")
@@ -170,7 +166,7 @@ async def my_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"inbox:{username}:0")])
     await update.message.reply_text('📬 သင်၏ အီးမေးလ်လိပ်စာများ (Inbox ကြည့်ရန်နှိပ်ပါ):', reply_markup=InlineKeyboardMarkup(keyboard))
 
-# --- INLINE BUTTON HANDLER & OTHER FUNCTIONS ---
+# --- INLINE BUTTON HANDLER & OTHER FUNCTIONS (No changes) ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -220,7 +216,7 @@ async def show_full_email(query, email_id):
     full_email_text = f"--- Email Details ---\n**From:** {from_addr}\n**Subject:** {subject}\n**Received:** {received_at}\n------------------\n{body}"
     await query.message.reply_text(full_email_text, parse_mode='Markdown')
 
-# --- ADMIN COMMANDS ---
+# --- ADMIN COMMANDS (No changes) ---
 async def admin_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, admin_function):
     if update.effective_user.id != ADMIN_ID: await update.message.reply_text("❌ Admin command ဖြစ်ပါသည်။"); return
     await admin_function(update, context)
@@ -277,7 +273,7 @@ async def deleteuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"🗑️ User ID `{user_id_to_delete}` နှင့် သက်ဆိုင်သော data အားလုံးကို အောင်မြင်စွာဖျက်ပြီးပါပြီ။", parse_mode='Markdown')
     else: await update.message.reply_text(f"⚠️ User ID `{user_id_to_delete}` ကို ရှာမတွေ့ပါ။", parse_mode='Markdown')
 
-# --- BACKGROUND TASKS & BOT SETUP ---
+# --- BACKGROUND TASKS & BOT SETUP (No changes) ---
 def auto_delete_expired_addresses():
     with sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES) as local_conn:
         cursor = local_conn.cursor()
