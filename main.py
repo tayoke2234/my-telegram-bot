@@ -1,4 +1,4 @@
-# Telegram Temp Mail Bot (Ultimate Fix Version)
+# Telegram Temp Mail Bot (Definitive Fix Version)
 # Deployed on Render.com, kept alive by UptimeRobot
 
 import logging
@@ -23,7 +23,7 @@ from telegram.constants import ParseMode
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "Bot is alive and running with the ultimate fix!"
+    return "Bot is alive and running with the definitive fix!"
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
@@ -80,7 +80,6 @@ def escape_markdown(text: str) -> str:
     """Helper function to escape telegram MarkdownV2 characters."""
     if not isinstance(text, str):
         return ""
-    # Escape all characters that have special meaning in MarkdownV2
     escape_chars = r'\_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
@@ -159,11 +158,19 @@ async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_reply_markup(reply_markup=None); return
 
         from_addr, subject, body, received_at_str = email_data
-        received_at = datetime.fromisoformat(received_at_str).strftime('%Y-%m-%d %H:%M')
+        
+        # <<< DEFINITIVE FIX FOR THE TIMESTAMP ERROR >>>
+        if isinstance(received_at_str, str):
+            try:
+                received_at = datetime.fromisoformat(received_at_str).strftime('%Y-%m-%d %H:%M')
+            except ValueError:
+                received_at = received_at_str # Fallback to the original string if format is wrong
+        else:
+            received_at = "Unknown Time" # Fallback if data is not a string at all
+
         body_text = body if body else "[Email body is empty]"
         if len(body_text) > 3800: body_text = body_text[:3800] + "\n\n[...]"
         
-        # Escape all parts of the message for MarkdownV2
         from_addr_escaped = escape_markdown(from_addr)
         subject_escaped = escape_markdown(subject)
         body_escaped = escape_markdown(body_text)
@@ -223,7 +230,6 @@ async def show_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- BACKGROUND EMAIL FETCHING ---
 def _blocking_imap_check():
-    """Synchronous function to perform the blocking IMAP check."""
     try:
         with imaplib.IMAP4_SSL(IMAP_SERVER) as mail:
             mail.login(CATCH_ALL_EMAIL, CATCH_ALL_PASSWORD)
@@ -243,7 +249,6 @@ def _blocking_imap_check():
         return []
 
 async def fetch_and_process_emails(application: Application):
-    """Asynchronous wrapper that runs the blocking IMAP check in a separate thread."""
     raw_emails = await asyncio.to_thread(_blocking_imap_check)
     if not raw_emails: return
 
@@ -282,7 +287,7 @@ async def fetch_and_process_emails(application: Application):
                         else: body = msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8', 'ignore')
                         
                         cursor.execute("INSERT INTO emails (address_id, message_id, from_address, subject, body, received_at) VALUES (?, ?, ?, ?, ?, ?)", 
-                                       (address_id, message_id_header, from_address, subject, body, datetime.now()))
+                                       (address_id, message_id_header, from_address, subject, body, datetime.now().isoformat()))
                         new_db_email_id = cursor.lastrowid
                         conn.commit()
                         
