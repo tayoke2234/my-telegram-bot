@@ -54,7 +54,6 @@ DB_PATH = '/data/tempmail.db' if os.path.exists('/data') else 'tempmail.db'
 db_lock = asyncio.Lock()
 
 def get_db_conn():
-    # Using PARSE_DECLTYPES to automatically convert DB types to Python types (e.g., TIMESTAMP to datetime)
     return sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
 
 def init_db():
@@ -149,7 +148,7 @@ async def my_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
-        await query.answer() # Acknowledge the button press immediately
+        await query.answer()
         email_id = int(query.data.split(':')[1])
         
         async with db_lock:
@@ -164,17 +163,14 @@ async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         from_addr, subject, body, received_at_obj = email_data
 
-        # *** FIX: The database returns a datetime object directly, no need for fromisoformat ***
         if isinstance(received_at_obj, datetime):
             received_at = received_at_obj.strftime('%Y-%m-%d %H:%M')
         else:
-            # Fallback in case it's a string for some reason
             received_at = str(received_at_obj)
 
         body_text = body if body else "[Email body is empty]"
         if len(body_text) > 3800: body_text = body_text[:3800] + "\n\n[...]"
         
-        # Escape all parts of the message for MarkdownV2
         from_addr_escaped = escape_markdown(from_addr)
         subject_escaped = escape_markdown(subject)
         body_escaped = escape_markdown(body_text)
@@ -185,18 +181,14 @@ async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         await context.bot.send_message(chat_id=query.from_user.id, text=message_text, parse_mode=ParseMode.MARKDOWN_V2)
         
-        # Edit the original message to show it has been opened. No markdown needed here.
         await query.edit_message_text(f"✅ Opened email from: {from_addr}", reply_markup=None)
 
     except BadRequest as e:
-        # Handle cases where markdown is malformed
         logger.error(f"Telegram BadRequest in show_email_content: {e}", exc_info=True)
         await context.bot.send_message(chat_id=query.from_user.id, text="❌ Email ကိုပြသရာတွင် အမှားအယွင်းဖြစ်ပွားပါသည်။ (Format Error)")
     except Exception as e:
         logger.error(f"Error in show_email_content for email_id {query.data}: {e}", exc_info=True)
-        # Use send_message instead of answer to provide a more visible error
         await context.bot.send_message(chat_id=query.from_user.id, text="❌ Email ကိုဖွင့်ရာတွင် အမှားအယွင်းဖြစ်ပွားပါသည်။")
-
 
 # --- ADMIN PANEL ---
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,8 +201,13 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_count = cursor.fetchone()[0]
                 cursor.execute("SELECT COUNT(*) FROM addresses")
                 email_count = cursor.fetchone()[0]
+        
         db_size_mb = round(os.path.getsize(DB_PATH) / (1024 * 1024), 2) if os.path.exists(DB_PATH) else 0
-        text = f"*👑 Admin Panel*\n- 👥 Users: `{user_count}`\n- 📧 Emails: `{email_count}`\n- 💽 DB: `{db_size_mb} MB`"
+        # *** FIX: Manually escape the DB size to prevent markdown errors with '.' ***
+        escaped_db_size = escape_markdown(str(db_size_mb))
+        
+        text = f"*👑 Admin Panel*\n- 👥 Users: `{user_count}`\n- 📧 Emails: `{email_count}`\n- 💽 DB: {escaped_db_size} MB"
+        
         keyboard = [[InlineKeyboardButton("👥 User စာရင်းကြည့်ရန်", callback_data="admin:users")]]
         
         if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
@@ -291,7 +288,12 @@ async def fetch_and_process_emails(application: Application):
                         subject_header = decode_header(msg["Subject"])[0]
                         from_header = decode_header(msg.get("From"))[0]
                         subject = subject_header[0].decode(subject_header[1] or 'utf-8', 'ignore') if isinstance(subject_header[0], bytes) else subject_header[0]
+                        
+                        # *** FIX: Add fallback for empty sender name ***
                         from_address = from_header[0].decode(from_header[1] or 'utf-8', 'ignore') if isinstance(from_header[0], bytes) else from_header[0]
+                        if not from_address or from_address.isspace():
+                            from_address = "Unknown Sender"
+
                         body = ""
                         if msg.is_multipart():
                             for part in msg.walk():
