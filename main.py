@@ -213,7 +213,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔄 Refresh Stats", callback_data="admin_panel")]
     ]
     
-    # Check if the command was triggered by a button press or a /admin command
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
@@ -228,10 +227,8 @@ async def show_all_users(query, page: int):
     async with db_lock:
         with get_db_conn() as conn:
             cursor = conn.cursor()
-            # Get total distinct users for pagination
             cursor.execute("SELECT COUNT(DISTINCT user_id) FROM addresses")
             total_users = cursor.fetchone()[0]
-            # Get users for the current page with their email count
             cursor.execute("""
                 SELECT user_id, COUNT(id) as email_count 
                 FROM addresses 
@@ -252,13 +249,9 @@ async def show_all_users(query, page: int):
         keyboard.append([InlineKeyboardButton(f"👁️‍🗨️ User {user_id} ကိုကြည့်ရန်", callback_data=f"admin_view_user:{user_id}:0")])
 
     pagination_buttons = []
-    if page > 0:
-        pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"admin_list_users:{page-1}"))
-    if (page + 1) * users_per_page < total_users:
-        pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"admin_list_users:{page+1}"))
-    
-    if pagination_buttons:
-        keyboard.append(pagination_buttons)
+    if page > 0: pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"admin_list_users:{page-1}"))
+    if (page + 1) * users_per_page < total_users: pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"admin_list_users:{page+1}"))
+    if pagination_buttons: keyboard.append(pagination_buttons)
     
     keyboard.append([InlineKeyboardButton("◀️ Admin Panel သို့ပြန်သွားရန်", callback_data="admin_panel")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -290,13 +283,9 @@ async def show_user_emails_for_admin(query, user_id_to_view: int, page: int):
         ])
         
     pagination_buttons = []
-    if page > 0:
-        pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"admin_view_user:{user_id_to_view}:{page-1}"))
-    if (page + 1) * emails_per_page < total_emails:
-        pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"admin_view_user:{user_id_to_view}:{page+1}"))
-        
-    if pagination_buttons:
-        keyboard.append(pagination_buttons)
+    if page > 0: pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"admin_view_user:{user_id_to_view}:{page-1}"))
+    if (page + 1) * emails_per_page < total_emails: pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"admin_view_user:{user_id_to_view}:{page+1}"))
+    if pagination_buttons: keyboard.append(pagination_buttons)
         
     keyboard.append([InlineKeyboardButton("◀️ User စာရင်းသို့ပြန်သွားရန်", callback_data="admin_list_users:0")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -319,17 +308,14 @@ async def execute_admin_delete(query, user_id_to_delete: int, username: str):
     async with db_lock:
         with get_db_conn() as conn:
             cursor = conn.cursor()
-            # Admin can delete any user's email
             cursor.execute("DELETE FROM addresses WHERE user_id = ? AND username = ?", (user_id_to_delete, username))
             rowcount = cursor.rowcount
             conn.commit()
     if rowcount > 0: 
         await query.edit_message_text(f"🗑️ `{full_address}` ကို အောင်မြင်စွာဖျက်ပြီးပါပြီ။", parse_mode='Markdown')
-        # Refresh the view of the user's emails
         await show_user_emails_for_admin(query, user_id_to_delete, 0)
     else: 
         await query.edit_message_text(f"⚠️ `{full_address}` ကို ရှာမတွေ့ပါ။", parse_mode='Markdown')
-
 
 # --- INLINE BUTTON HANDLER ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -341,6 +327,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # User actions
     if action == "inbox": await show_inbox(query, username=data[1], page=int(data[2]))
+    elif action == "read_email": await show_full_email(query, email_id=int(data[1])) # <<< NEW ACTION
     elif action == "user_delete_confirm": await confirm_user_delete(query, username=data[1])
     elif action == "user_delete_execute": await execute_user_delete(query, username=data[1])
     elif action == "country_page": await show_country_page(query.edit_message_text, page=int(data[1]))
@@ -355,9 +342,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "admin_delete_confirm": await confirm_admin_delete(query, user_id_to_delete=int(data[1]), username=data[2])
         elif action == "admin_delete_execute": await execute_admin_delete(query, user_id_to_delete=int(data[1]), username=data[2])
     else:
-        # If a non-admin clicks an admin button
         await query.answer("⛔️ You are not authorized for this action.", show_alert=True)
-
 
 async def confirm_user_delete(query: Update, username: str):
     keyboard = [[
@@ -392,6 +377,7 @@ async def generate_address(query: Update, country: str):
     )
     await query.edit_message_text(address, parse_mode='Markdown')
     
+# <<< MODIFIED FUNCTION: show_inbox >>>
 async def show_inbox(query, username, page):
     user_id = query.from_user.id
     async with db_lock:
@@ -410,28 +396,81 @@ async def show_inbox(query, username, page):
             address_id = address_row[0]
             emails_per_page = 5
             offset = page * emails_per_page
-            cursor.execute("SELECT id, from_address, subject, received_at FROM emails WHERE address_id = ? ORDER BY received_at DESC LIMIT ? OFFSET ?", (address_id, emails_per_page, offset))
+            # Fetch email ID, from, and subject for the list
+            cursor.execute("SELECT id, from_address, subject FROM emails WHERE address_id = ? ORDER BY received_at DESC LIMIT ? OFFSET ?", (address_id, emails_per_page, offset))
             emails = cursor.fetchall()
             cursor.execute("SELECT COUNT(*) FROM emails WHERE address_id = ?", (address_id,))
             total_emails = cursor.fetchone()[0]
 
+    full_address = f"{username}@{YOUR_DOMAIN}"
     if total_emails == 0: 
-        await query.edit_message_text(f"📥 `{username}@{YOUR_DOMAIN}` ၏ inbox ထဲမှာ email မရှိသေးပါ။", parse_mode='Markdown'); return
+        await query.edit_message_text(f"📥 `{full_address}` ၏ inbox ထဲမှာ email မရှိသေးပါ။", parse_mode='Markdown'); return
 
-    message_text = f"📥 **{username}@{YOUR_DOMAIN}** (Inbox: {page + 1})\n\n"
+    message_text = f"📥 **Inbox: {full_address}** (Page {page + 1})\n\nဖတ်ရှုရန် email တစ်ခုကို ရွေးချယ်ပါ:"
     keyboard = []
-    for email_id, from_addr, subject, received_at in emails:
-        message_text += f"**From:** {from_addr}\n**Sub:** {subject}\n_{datetime.fromisoformat(received_at).strftime('%Y-%m-%d %H:%M')}_\n\n"
+    # Create a button for each email
+    for email_id, from_addr, subject in emails:
+        # Truncate long subjects/senders for display on the button
+        button_text = f"📧 {from_addr[:25]}... - {subject[:25]}..."
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"read_email:{email_id}")])
     
     pagination_buttons = []
     if page > 0: pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"inbox:{username}:{page-1}"))
     if (page + 1) * emails_per_page < total_emails: pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"inbox:{username}:{page+1}"))
     if pagination_buttons: keyboard.append(pagination_buttons)
 
+    # Add a back button for easier navigation
+    keyboard.append([InlineKeyboardButton("◀️ Email စာရင်းများသို့ ပြန်သွားရန်", callback_data="back_to_myemails")])
+
     try:
         await query.edit_message_text(text=message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     except Exception as e:
-        if "Message is not modified" not in str(e): logger.error(f"Error editing message for inbox: {e}")
+        if "Message is not modified" not in str(e): 
+            logger.error(f"Error editing message for inbox list: {e}")
+            await query.answer("❌ Inbox ကိုဖွင့်ရာတွင် အမှားအယွင်းဖြစ်ပွားပါသည်။", show_alert=True)
+
+# <<< NEW FUNCTION: show_full_email >>>
+async def show_full_email(query, email_id):
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            # Fetch all details for the specific email
+            cursor.execute("""
+                SELECT e.from_address, e.subject, e.body, e.received_at, a.username
+                FROM emails e
+                JOIN addresses a ON e.address_id = a.id
+                WHERE e.id = ?
+            """, (email_id,))
+            email_data = cursor.fetchone()
+
+    if not email_data:
+        await query.edit_message_text("❌ Error: Email not found.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Inbox သို့ပြန်သွားရန်", callback_data="back_to_myemails")]]))
+        return
+
+    from_addr, subject, body, received_at_str, username = email_data
+    received_at = datetime.fromisoformat(received_at_str).strftime('%Y-%m-%d %H:%M')
+
+    # Truncate body to prevent hitting the character limit again
+    max_len = 3800 # Leave buffer for headers
+    if len(body) > max_len:
+        body = body[:max_len] + "\n\n[...စာသားအရှည်ကိုဖြတ်တောက်ထားပါသည်...]"
+
+    message_text = (
+        f"**From:** `{from_addr}`\n"
+        f"**Subject:** `{subject}`\n"
+        f"**Received:** `{received_at}`\n"
+        f"----------------------------------------\n\n"
+        f"{body}"
+    )
+    
+    # Go back to the first page of the correct inbox
+    keyboard = [[InlineKeyboardButton("◀️ Inbox သို့ပြန်သွားရန်", callback_data=f"inbox:{username}:0")]]
+
+    try:
+        await query.edit_message_text(text=message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error showing full email: {e}")
+        await query.answer("❌ Email ကိုပြသရာတွင် အမှားအယွင်းဖြစ်ပွားပါသည်။", show_alert=True)
 
 # --- BACKGROUND TASKS & BOT SETUP ---
 def auto_delete_expired_addresses():
@@ -520,7 +559,6 @@ async def post_init(application: Application):
         except Exception as e:
             logger.error(f"Failed to set admin commands: {e}")
 
-
     asyncio.create_task(background_tasks_loop(application))
 
 # --- MAIN FUNCTION ---
@@ -536,7 +574,6 @@ def main():
     application.add_handler(CommandHandler("new", new_email))
     application.add_handler(CommandHandler("myemails", my_emails))
     application.add_handler(CommandHandler("random", random_address_command))
-    # Admin Handler
     application.add_handler(CommandHandler("admin", admin_panel))
     
     # Callback Handler
