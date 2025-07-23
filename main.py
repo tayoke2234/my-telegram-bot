@@ -18,6 +18,7 @@ from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 # --- FLASK WEB SERVER ---
 app = Flask(__name__)
@@ -53,6 +54,7 @@ DB_PATH = '/data/tempmail.db' if os.path.exists('/data') else 'tempmail.db'
 db_lock = asyncio.Lock()
 
 def get_db_conn():
+    # Using PARSE_DECLTYPES to automatically convert DB types to Python types (e.g., TIMESTAMP to datetime)
     return sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
 
 def init_db():
@@ -69,7 +71,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS emails (
                 id INTEGER PRIMARY KEY, address_id INTEGER NOT NULL, message_id TEXT UNIQUE,
                 from_address TEXT NOT NULL, subject TEXT NOT NULL, body TEXT,
-                received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                received_at timestamp,
                 FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE CASCADE
             )
         ''')
@@ -81,8 +83,7 @@ def escape_markdown(text: str) -> str:
     if not isinstance(text, str):
         return ""
     # Escape all characters that have special meaning in MarkdownV2
-    # Added '<' to the list to prevent errors with sender names like "Name <email@host.com>"
-    escape_chars = r'\_*[]()~`>#+-=|{}.!<'
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 # --- BOT COMMANDS & HELPERS ---
@@ -148,7 +149,9 @@ async def my_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
+        await query.answer() # Acknowledge the button press immediately
         email_id = int(query.data.split(':')[1])
+        
         async with db_lock:
             with get_db_conn() as conn:
                 cursor = conn.cursor()
@@ -156,11 +159,18 @@ async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 email_data = cursor.fetchone()
 
         if not email_data:
-            await query.answer("❌ Email ကို ရှာမတွေ့ပါ။", show_alert=True)
+            await context.bot.send_message(chat_id=query.from_user.id, text="❌ Email ကို ရှာမတွေ့ပါ။")
             await query.edit_message_reply_markup(reply_markup=None); return
 
-        from_addr, subject, body, received_at_str = email_data
-        received_at = datetime.fromisoformat(received_at_str).strftime('%Y-%m-%d %H:%M')
+        from_addr, subject, body, received_at_obj = email_data
+
+        # *** FIX: The database returns a datetime object directly, no need for fromisoformat ***
+        if isinstance(received_at_obj, datetime):
+            received_at = received_at_obj.strftime('%Y-%m-%d %H:%M')
+        else:
+            # Fallback in case it's a string for some reason
+            received_at = str(received_at_obj)
+
         body_text = body if body else "[Email body is empty]"
         if len(body_text) > 3800: body_text = body_text[:3800] + "\n\n[...]"
         
@@ -175,12 +185,18 @@ async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         await context.bot.send_message(chat_id=query.from_user.id, text=message_text, parse_mode=ParseMode.MARKDOWN_V2)
         
-        await query.answer("✅ Email content sent.")
+        # Edit the original message to show it has been opened. No markdown needed here.
         await query.edit_message_text(f"✅ Opened email from: {from_addr}", reply_markup=None)
 
+    except BadRequest as e:
+        # Handle cases where markdown is malformed
+        logger.error(f"Telegram BadRequest in show_email_content: {e}", exc_info=True)
+        await context.bot.send_message(chat_id=query.from_user.id, text="❌ Email ကိုပြသရာတွင် အမှားအယွင်းဖြစ်ပွားပါသည်။ (Format Error)")
     except Exception as e:
         logger.error(f"Error in show_email_content for email_id {query.data}: {e}", exc_info=True)
-        await query.answer("❌ Email ကိုဖွင့်ရာတွင် အမှားအယွင်းဖြစ်ပွားပါသည်။", show_alert=True)
+        # Use send_message instead of answer to provide a more visible error
+        await context.bot.send_message(chat_id=query.from_user.id, text="❌ Email ကိုဖွင့်ရာတွင် အမှားအယွင်းဖြစ်ပွားပါသည်။")
+
 
 # --- ADMIN PANEL ---
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -205,6 +221,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
+        await query.answer()
         async with db_lock:
             with get_db_conn() as conn:
                 cursor = conn.cursor()
