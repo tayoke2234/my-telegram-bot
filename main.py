@@ -22,7 +22,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "Bot is alive and running with definitive fixes!"
+    return "Bot is alive and running with definitive fixes and admin panel!"
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
@@ -183,20 +183,181 @@ async def show_country_page(reply_func, page: int):
         
     await reply_func("🌍 ကျေးဇူးပြု၍ နိုင်ငံတစ်ခုရွေးချယ်ပါ:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+# --- ADMIN PANEL ---
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔️ You are not authorized to use this command.")
+        return
+
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(DISTINCT user_id) FROM addresses")
+            user_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM addresses")
+            email_count = cursor.fetchone()[0]
+    
+    db_size_bytes = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+    db_size_mb = round(db_size_bytes / (1024 * 1024), 2)
+
+    text = (
+        f"👑 **Admin Control Panel** 👑\n\n"
+        f"📊 **Bot Stats:**\n"
+        f"  - 👥 Active Users: `{user_count}`\n"
+        f"  - 📧 Total Emails Created: `{email_count}`\n"
+        f"  - 💽 DB Storage Used: `{db_size_mb} MB`\n"
+    )
+    keyboard = [
+        [InlineKeyboardButton("👥 User စာရင်းကြည့်ရန်", callback_data="admin_list_users:0")],
+        [InlineKeyboardButton("🔄 Refresh Stats", callback_data="admin_panel")]
+    ]
+    
+    # Check if the command was triggered by a button press or a /admin command
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def show_all_users(query, page: int):
+    if query.from_user.id != ADMIN_ID: return
+    
+    users_per_page = 5
+    offset = page * users_per_page
+    
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            # Get total distinct users for pagination
+            cursor.execute("SELECT COUNT(DISTINCT user_id) FROM addresses")
+            total_users = cursor.fetchone()[0]
+            # Get users for the current page with their email count
+            cursor.execute("""
+                SELECT user_id, COUNT(id) as email_count 
+                FROM addresses 
+                GROUP BY user_id 
+                ORDER BY user_id 
+                LIMIT ? OFFSET ?
+            """, (users_per_page, offset))
+            users = cursor.fetchall()
+
+    if not users:
+        await query.edit_message_text("👥 User မရှိသေးပါ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Admin Panel သို့ပြန်သွားရန်", callback_data="admin_panel")]]))
+        return
+
+    text = f"👥 **User စာရင်း** (Page {page + 1})\n\n"
+    keyboard = []
+    for user_id, email_count in users:
+        text += f"- `ID: {user_id}` (Emails: {email_count})\n"
+        keyboard.append([InlineKeyboardButton(f"👁️‍🗨️ User {user_id} ကိုကြည့်ရန်", callback_data=f"admin_view_user:{user_id}:0")])
+
+    pagination_buttons = []
+    if page > 0:
+        pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"admin_list_users:{page-1}"))
+    if (page + 1) * users_per_page < total_users:
+        pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"admin_list_users:{page+1}"))
+    
+    if pagination_buttons:
+        keyboard.append(pagination_buttons)
+    
+    keyboard.append([InlineKeyboardButton("◀️ Admin Panel သို့ပြန်သွားရန်", callback_data="admin_panel")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def show_user_emails_for_admin(query, user_id_to_view: int, page: int):
+    if query.from_user.id != ADMIN_ID: return
+
+    emails_per_page = 5
+    offset = page * emails_per_page
+    
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM addresses WHERE user_id = ?", (user_id_to_view,))
+            total_emails = cursor.fetchone()[0]
+            cursor.execute("SELECT username, full_address FROM addresses WHERE user_id = ? LIMIT ? OFFSET ?", (user_id_to_view, emails_per_page, offset))
+            addresses = cursor.fetchall()
+            
+    if not addresses:
+        await query.edit_message_text(f"User `{user_id_to_view}` အတွက် email မရှိပါ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ User စာရင်းသို့ပြန်သွားရန်", callback_data="admin_list_users:0")]]))
+        return
+        
+    text = f"📧 **User `{user_id_to_view}` ၏ Email များ** (Page {page+1})\n\n"
+    keyboard = []
+    for username, full_address in addresses:
+        text += f"- `{full_address}`\n"
+        keyboard.append([
+            InlineKeyboardButton(f"🗑️ Delete", callback_data=f"admin_delete_confirm:{user_id_to_view}:{username}")
+        ])
+        
+    pagination_buttons = []
+    if page > 0:
+        pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"admin_view_user:{user_id_to_view}:{page-1}"))
+    if (page + 1) * emails_per_page < total_emails:
+        pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"admin_view_user:{user_id_to_view}:{page+1}"))
+        
+    if pagination_buttons:
+        keyboard.append(pagination_buttons)
+        
+    keyboard.append([InlineKeyboardButton("◀️ User စာရင်းသို့ပြန်သွားရန်", callback_data="admin_list_users:0")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def confirm_admin_delete(query, user_id_to_delete: int, username: str):
+    if query.from_user.id != ADMIN_ID: return
+    keyboard = [[
+        InlineKeyboardButton("✅ Yes, delete", callback_data=f"admin_delete_execute:{user_id_to_delete}:{username}"),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"admin_view_user:{user_id_to_delete}:0")
+    ]]
+    await query.edit_message_text(
+        text=f"❓ User `{user_id_to_delete}` ၏ email `{username}@{YOUR_DOMAIN}` ကို အပြီးတိုင်ဖျက်ရန် သေချာပါသလား?", 
+        reply_markup=InlineKeyboardMarkup(keyboard), 
+        parse_mode='Markdown'
+    )
+
+async def execute_admin_delete(query, user_id_to_delete: int, username: str):
+    if query.from_user.id != ADMIN_ID: return
+    full_address = f"{username}@{YOUR_DOMAIN}"
+    async with db_lock:
+        with get_db_conn() as conn:
+            cursor = conn.cursor()
+            # Admin can delete any user's email
+            cursor.execute("DELETE FROM addresses WHERE user_id = ? AND username = ?", (user_id_to_delete, username))
+            rowcount = cursor.rowcount
+            conn.commit()
+    if rowcount > 0: 
+        await query.edit_message_text(f"🗑️ `{full_address}` ကို အောင်မြင်စွာဖျက်ပြီးပါပြီ။", parse_mode='Markdown')
+        # Refresh the view of the user's emails
+        await show_user_emails_for_admin(query, user_id_to_delete, 0)
+    else: 
+        await query.edit_message_text(f"⚠️ `{full_address}` ကို ရှာမတွေ့ပါ။", parse_mode='Markdown')
+
+
 # --- INLINE BUTTON HANDLER ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data.split(':')
     action = data[0]
+    user_id = query.from_user.id
 
+    # User actions
     if action == "inbox": await show_inbox(query, username=data[1], page=int(data[2]))
     elif action == "user_delete_confirm": await confirm_user_delete(query, username=data[1])
     elif action == "user_delete_execute": await execute_user_delete(query, username=data[1])
     elif action == "country_page": await show_country_page(query.edit_message_text, page=int(data[1]))
     elif action == "gen_address": await generate_address(query, country=data[1])
     elif action == "cancel_delete": await query.edit_message_text("🗑️ ဖျက်ခြင်းကို ပယ်ဖျက်လိုက်ပါသည်။")
-    # (Admin actions can be added here if needed)
+    
+    # Admin actions - protected
+    elif user_id == ADMIN_ID:
+        if action == "admin_panel": await admin_panel(update, context)
+        elif action == "admin_list_users": await show_all_users(query, page=int(data[1]))
+        elif action == "admin_view_user": await show_user_emails_for_admin(query, user_id_to_view=int(data[1]), page=int(data[2]))
+        elif action == "admin_delete_confirm": await confirm_admin_delete(query, user_id_to_delete=int(data[1]), username=data[2])
+        elif action == "admin_delete_execute": await execute_admin_delete(query, user_id_to_delete=int(data[1]), username=data[2])
+    else:
+        # If a non-admin clicks an admin button
+        await query.answer("⛔️ You are not authorized for this action.", show_alert=True)
+
 
 async def confirm_user_delete(query: Update, username: str):
     keyboard = [[
@@ -231,38 +392,40 @@ async def generate_address(query: Update, country: str):
     )
     await query.edit_message_text(address, parse_mode='Markdown')
     
-# (Other functions like show_inbox, show_full_email, admin commands, background tasks remain the same)
-async def show_inbox(query, username, page, is_admin=False):
+async def show_inbox(query, username, page):
     user_id = query.from_user.id
     async with db_lock:
         with get_db_conn() as conn:
             cursor = conn.cursor()
-            if is_admin and user_id == ADMIN_ID:
+            # Allow admin to see any inbox, but regular users only their own
+            if user_id == ADMIN_ID:
                 cursor.execute("SELECT id FROM addresses WHERE username = ?", (username,))
             else:
                 cursor.execute("SELECT id FROM addresses WHERE user_id = ? AND username = ?", (user_id, username))
-            address_row = cursor.fetchone()
-            if not address_row: await query.edit_message_text("❌ Error: Email address not found."); return
             
-            address_id, emails_per_page = address_row[0], 5
+            address_row = cursor.fetchone()
+            if not address_row: 
+                await query.edit_message_text("❌ Error: Email address not found or you don't have permission to view it."); return
+            
+            address_id = address_row[0]
+            emails_per_page = 5
             offset = page * emails_per_page
             cursor.execute("SELECT id, from_address, subject, received_at FROM emails WHERE address_id = ? ORDER BY received_at DESC LIMIT ? OFFSET ?", (address_id, emails_per_page, offset))
             emails = cursor.fetchall()
             cursor.execute("SELECT COUNT(*) FROM emails WHERE address_id = ?", (address_id,))
             total_emails = cursor.fetchone()[0]
 
-    if total_emails == 0: await query.edit_message_text(f"📥 `{username}@{YOUR_DOMAIN}` ၏ inbox ထဲမှာ email မရှိသေးပါ။", parse_mode='Markdown'); return
+    if total_emails == 0: 
+        await query.edit_message_text(f"📥 `{username}@{YOUR_DOMAIN}` ၏ inbox ထဲမှာ email မရှိသေးပါ။", parse_mode='Markdown'); return
 
     message_text = f"📥 **{username}@{YOUR_DOMAIN}** (Inbox: {page + 1})\n\n"
     keyboard = []
     for email_id, from_addr, subject, received_at in emails:
         message_text += f"**From:** {from_addr}\n**Sub:** {subject}\n_{datetime.fromisoformat(received_at).strftime('%Y-%m-%d %H:%M')}_\n\n"
-        # For simplicity, full email view is removed in this version, can be added back if needed
     
     pagination_buttons = []
-    page_callback_prefix = "admin_inbox" if is_admin else "inbox"
-    if page > 0: pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"{page_callback_prefix}:{username}:{page-1}"))
-    if (page + 1) * emails_per_page < total_emails: pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"{page_callback_prefix}:{username}:{page+1}"))
+    if page > 0: pagination_buttons.append(InlineKeyboardButton("◀️ ရှေ့", callback_data=f"inbox:{username}:{page-1}"))
+    if (page + 1) * emails_per_page < total_emails: pagination_buttons.append(InlineKeyboardButton("နောက် ▶️", callback_data=f"inbox:{username}:{page+1}"))
     if pagination_buttons: keyboard.append(pagination_buttons)
 
     try:
@@ -347,12 +510,16 @@ async def post_init(application: Application):
     ]
     await application.bot.set_my_commands(user_commands)
     
-    # Admin commands can be added here if needed, keeping user menu simple
     if ADMIN_ID != 0:
         admin_commands = user_commands + [
-            # Add admin specific commands here for the admin's menu
+            BotCommand("admin", "👑 Admin Control Panel ကိုဖွင့်ရန်"),
         ]
-        await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+        try:
+            await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+            logger.info(f"Custom commands set for ADMIN_ID {ADMIN_ID}")
+        except Exception as e:
+            logger.error(f"Failed to set admin commands: {e}")
+
 
     asyncio.create_task(background_tasks_loop(application))
 
@@ -369,7 +536,10 @@ def main():
     application.add_handler(CommandHandler("new", new_email))
     application.add_handler(CommandHandler("myemails", my_emails))
     application.add_handler(CommandHandler("random", random_address_command))
+    # Admin Handler
+    application.add_handler(CommandHandler("admin", admin_panel))
     
+    # Callback Handler
     application.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("Bot is starting to poll...")
