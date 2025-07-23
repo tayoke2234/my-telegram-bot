@@ -12,7 +12,8 @@ import re
 import imaplib
 import email
 from email.header import decode_header
-from flask import Flask, escape
+from flask import Flask
+from markupsafe import escape  # <<< FIX: Import escape from markupsafe
 from threading import Thread
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
@@ -99,6 +100,8 @@ def view_email(email_id):
         received_at_str = received_at_obj.strftime('%Y-%m-%d %H:%M:%S') if isinstance(received_at_obj, datetime) else "N/A"
         safe_from = escape(from_addr)
         safe_subject = escape(subject)
+        # The body is already escaped by the escape_markdown function for Telegram, 
+        # but we should escape it for HTML display as well.
         safe_body = escape(body).replace('\n', '<br>')
 
         html = f"""
@@ -114,7 +117,9 @@ def view_email(email_id):
 
 # --- MARKDOWN SANITIZER ---
 def escape_markdown(text: str) -> str:
+    """Escapes characters for Telegram's MarkdownV2 parse mode."""
     if not isinstance(text, str): return ""
+    # Chars to escape for MarkdownV2
     escape_chars = r'\_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
@@ -144,10 +149,12 @@ async def new_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             with get_db_conn() as conn:
                 cursor = conn.cursor()
+                # Check daily limit
                 cursor.execute("SELECT COUNT(*) FROM addresses WHERE user_id = ? AND creation_date = ?", (user_id, datetime.now().date()))
                 if cursor.fetchone()[0] >= DAILY_LIMIT:
                     await update.message.reply_text(f"⚠️ တစ်နေ့တာအတွက် သတ်မှတ်ထားတဲ့ အီးမေးလ် {DAILY_LIMIT} ခု ပြည့်သွားပါပြီ။"); return
                 
+                # Insert new address
                 cursor.execute("INSERT INTO addresses (user_id, full_address, creation_date) VALUES (?, ?, ?)",
                                (user_id, full_address, datetime.now().date()))
                 conn.commit()
@@ -168,6 +175,7 @@ async def my_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 addresses = cursor.fetchall()
         if not addresses:
             await update.message.reply_text("သင်ဖန်တီးထားတဲ့ အီးမေးလ်လိပ်စာ မရှိသေးပါ။ `/new` ကိုသုံးပြီး အသစ်ဖန်တီးနိုင်ပါတယ်။"); return
+        
         escaped_addresses = [escape_markdown(f"• {addr[0]}") for addr in addresses]
         message_text = "*📬 သင်၏ Email လိပ်စာများ:*\n\n" + "\n".join(escaped_addresses)
         await update.message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN_V2)
@@ -186,8 +194,10 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cursor.execute("SELECT COUNT(*) FROM addresses")
                 email_count = cursor.fetchone()[0]
         db_size_mb = round(os.path.getsize(DB_PATH) / (1024 * 1024), 2) if os.path.exists(DB_PATH) else 0
+        
         text = f"*👑 Admin Panel*\n- 👥 Users: `{user_count}`\n- 📧 Addresses: `{email_count}`\n- 💽 DB Size: `{escape_markdown(str(db_size_mb))} MB`"
         keyboard = [[InlineKeyboardButton("👥 User စာရင်းကြည့်ရန်", callback_data="admin:users")]]
+        
         if update.callback_query:
             await update.callback_query.answer()
             await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
@@ -209,10 +219,13 @@ async def show_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cursor = conn.cursor()
                 cursor.execute("SELECT user_id, COUNT(id) FROM addresses GROUP BY user_id ORDER BY COUNT(id) DESC")
                 users = cursor.fetchall()
-        if not users: text = "👥 Bot ကိုအသုံးပြုနေသူ မရှိသေးပါ။"
+        
+        if not users: 
+            text = "👥 Bot ကိုအသုံးပြုနေသူ မရှိသေးပါ။"
         else: 
             user_lines = [escape_markdown(f"• ID: {uid} (Addresses: {count})") for uid, count in users]
             text = "*👥 Active User List:*\n\n" + "\n".join(user_lines)
+            
         keyboard = [[InlineKeyboardButton("◀️ Admin Panel သို့ပြန်သွားရန်", callback_data="admin:panel")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
@@ -221,17 +234,21 @@ async def show_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- BACKGROUND EMAIL FETCHING ---
 def _blocking_imap_check():
+    """Connects to IMAP, fetches unseen emails, marks them as seen, and returns them."""
     try:
         with imaplib.IMAP4_SSL(IMAP_SERVER) as mail:
             mail.login(CATCH_ALL_EMAIL, CATCH_ALL_PASSWORD)
             mail.select("inbox")
             _, messages = mail.search(None, '(UNSEEN)')
             email_ids_bytes = messages[0].split()
-            if not email_ids_bytes: return []
+            if not email_ids_bytes:
+                return []
+
             fetched_emails = []
             for mail_id in email_ids_bytes:
                 _, msg_data = mail.fetch(mail_id, "(RFC822)")
                 fetched_emails.append(msg_data[0][1])
+                # Mark the email as seen on the server
                 mail.store(mail_id, '+FLAGS', '\\Seen')
             return fetched_emails
     except Exception as e:
@@ -239,48 +256,88 @@ def _blocking_imap_check():
         return []
 
 async def fetch_and_process_emails(application: Application):
+    """Fetches emails in a separate thread and processes them."""
     raw_emails = await asyncio.to_thread(_blocking_imap_check)
-    if not raw_emails: return
+    if not raw_emails:
+        return
+    
     logger.info(f"Found {len(raw_emails)} new emails. Processing...")
     async with db_lock:
         with get_db_conn() as conn:
             for raw_email_data in raw_emails:
                 try:
                     msg = email.message_from_bytes(raw_email_data)
+                    
                     message_id_header = msg.get("Message-ID")
-                    if not message_id_header: continue
+                    if not message_id_header:
+                        continue # Skip if no message-id to prevent duplicates
+
                     cursor = conn.cursor()
                     cursor.execute("SELECT id FROM emails WHERE message_id = ?", (message_id_header,))
-                    if cursor.fetchone(): continue
+                    if cursor.fetchone():
+                        continue # Already processed
+
                     to_header = msg.get("To") or msg.get("Delivered-To") or ""
                     to_address = email.utils.parseaddr(to_header)[1].lower()
-                    if not to_address or not to_address.endswith(f"@{EMAIL_DOMAIN}"): continue
+                    
+                    if not to_address or not to_address.endswith(f"@{EMAIL_DOMAIN}"):
+                        continue
+
                     cursor.execute("SELECT id, user_id FROM addresses WHERE full_address = ?", (to_address,))
                     address_row = cursor.fetchone()
+
                     if address_row:
                         address_id, user_id = address_row
+                        
+                        # Decode subject and from address properly
                         subject_header = decode_header(msg["Subject"])[0]
                         from_header = decode_header(msg.get("From"))[0]
+                        
                         subject = subject_header[0].decode(subject_header[1] or 'utf-8', 'ignore') if isinstance(subject_header[0], bytes) else subject_header[0]
                         from_address = from_header[0].decode(from_header[1] or 'utf-8', 'ignore') if isinstance(from_header[0], bytes) else from_header[0]
-                        if not from_address or from_address.isspace(): from_address = "Unknown Sender"
+
+                        if not from_address or from_address.isspace():
+                            from_address = "Unknown Sender"
+
                         body = ""
                         if msg.is_multipart():
                             for part in msg.walk():
                                 if part.get_content_type() == "text/plain":
-                                    body = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', 'ignore'); break
-                        else: body = msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8', 'ignore')
+                                    try:
+                                        body = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', 'ignore')
+                                        break
+                                    except (UnicodeDecodeError, AttributeError):
+                                        body = "[Could not decode email content]"
+                        else:
+                            try:
+                                body = msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8', 'ignore')
+                            except (UnicodeDecodeError, AttributeError):
+                                body = "[Could not decode email content]"
+
                         cursor.execute("INSERT INTO emails (address_id, message_id, from_address, subject, body, received_at) VALUES (?, ?, ?, ?, ?, ?)", 
                                        (address_id, message_id_header, from_address, subject, body, datetime.now()))
                         new_db_email_id = cursor.lastrowid
                         conn.commit()
+
                         # Use APP_HOST_DOMAIN for the view link
                         view_url = f"https://{APP_HOST_DOMAIN}/view_email/{new_db_email_id}"
+                        
                         escaped_from = escape_markdown(from_address)
                         escaped_subject = escape_markdown(subject)
+                        
                         notification_text = f"📧 *စာအသစ်ရောက်ရှိပါသည်*\n\n*From:* {escaped_from}\n*Subject:* {escaped_subject}"
                         keyboard = [[InlineKeyboardButton("📖 Browser တွင်ဖွင့်ဖတ်ရန်", url=view_url)]]
-                        await application.bot.send_message(chat_id=user_id, text=notification_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
+                        
+                        try:
+                            await application.bot.send_message(
+                                chat_id=user_id, 
+                                text=notification_text, 
+                                reply_markup=InlineKeyboardMarkup(keyboard), 
+                                parse_mode=ParseMode.MARKDOWN_V2
+                            )
+                        except BadRequest as e:
+                            logger.error(f"Failed to send notification to {user_id}: {e}")
+
                 except Exception as e:
                     logger.error(f"Error processing single email in DB: {e}", exc_info=True)
 
@@ -291,20 +348,41 @@ async def background_tasks_loop(application: Application):
             await fetch_and_process_emails(application)
         except Exception as e:
             logger.error(f"Error in background_tasks_loop: {e}", exc_info=True)
+        # Check for emails every 45 seconds
         await asyncio.sleep(45)
 
 async def post_init(application: Application):
-    commands = [BotCommand("start", "Bot ကိုစတင်ရန်"), BotCommand("new", "Email အသစ်ဖန်တီးရန်"), BotCommand("myemails", "သင်၏ email များကိုကြည့်ရန်"), BotCommand("help", "အကူအညီကြည့်ရန်")]
+    """Post-initialization function to set up commands and background tasks."""
+    commands = [
+        BotCommand("start", "Bot ကိုစတင်ရန်"),
+        BotCommand("new", "Email အသစ်ဖန်တီးရန်"),
+        BotCommand("myemails", "သင်၏ email များကိုကြည့်ရန်"),
+        BotCommand("help", "အကူအညီကြည့်ရန်")
+    ]
     await application.bot.set_my_commands(commands)
+    
     if ADMIN_ID != 0:
         admin_commands = commands + [BotCommand("admin", "👑 Admin Panel")]
-        await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+        try:
+            await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+        except Exception as e:
+            logger.warning(f"Could not set admin commands for chat {ADMIN_ID}: {e}")
+
+    # Start the background task
     asyncio.create_task(background_tasks_loop(application))
 
 def main():
+    """Start the bot."""
+    # Initialize the database
     init_db()
+    
+    # Start the Flask web server in a background thread
     start_web_server_in_thread()
+
+    # Set up the Telegram bot application
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("new", new_email))
@@ -312,6 +390,8 @@ def main():
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CallbackQueryHandler(show_admin_users, pattern=r'^admin:users'))
     application.add_handler(CallbackQueryHandler(admin_panel, pattern=r'^admin:panel'))
+
+    # Start polling
     logger.info("Bot is starting to poll...")
     application.run_polling()
 
