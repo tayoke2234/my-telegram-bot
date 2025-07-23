@@ -1,4 +1,4 @@
-# Telegram Temp Mail Bot (Definitive Final Version - All Features & Bug Fixes)
+# Telegram Temp Mail Bot (Ultimate Fix Version)
 # Deployed on Render.com, kept alive by UptimeRobot
 
 import logging
@@ -16,13 +16,14 @@ from flask import Flask
 from threading import Thread
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.constants import ParseMode
 
 # --- FLASK WEB SERVER ---
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "Bot is alive and running with new email workflow and admin fixes!"
+    return "Bot is alive and running with the ultimate fix!"
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
@@ -42,7 +43,7 @@ try:
     CATCH_ALL_PASSWORD = os.environ['CATCH_ALL_PASSWORD']
     ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))
     IMAP_SERVER = "imap.gmail.com"
-    DAILY_LIMIT = 10 # Increased limit slightly
+    DAILY_LIMIT = 10
 except KeyError as e:
     print(f"!!! FATAL ERROR: Environment variable {e} is not set on Render.com !!!")
     exit()
@@ -74,20 +75,29 @@ def init_db():
         ''')
         conn.commit()
 
+# --- MARKDOWN SANITIZER ---
+def escape_markdown(text: str) -> str:
+    """Helper function to escape telegram MarkdownV2 characters."""
+    if not isinstance(text, str):
+        return ""
+    # Escape all characters that have special meaning in MarkdownV2
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+
 # --- BOT COMMANDS & HELPERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Bot မှကြိုဆိုပါတယ်။ Email အသစ်ဖန်တီးရန် `/new` ကိုသုံးပါ။")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
-    **ℹ️ အကူအညီ နှင့် အသုံးပြုပုံ**
+    *ℹ️ အကူအညီ နှင့် အသုံးပြုပုံ*
 
     - `/new`: ကျပန်းနာမည်ဖြင့် email ဖန်တီးရန်။
     - `/new <name>`: ကိုယ်ပိုင်နာမည်ဖြင့် email ဖန်တီးရန်။
     - `/myemails`: သင်ဖန်တီးထားသော email လိပ်စာများကို ကြည့်ရန်။
     - `/admin`: (Admin only) Bot ကို ထိန်းချုပ်ရန်။
     """
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def new_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -111,9 +121,9 @@ async def new_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cursor.execute("INSERT INTO addresses (user_id, username, full_address, creation_date) VALUES (?, ?, ?, ?)",
                                (user_id, username, full_address, date.today()))
                 conn.commit()
-                await update.message.reply_text(f"✅ အီးမေးလ်လိပ်စာအသစ် ရပါပြီ:\n\n`{full_address}`", parse_mode='Markdown')
+                await update.message.reply_text(f"✅ အီးမေးလ်လိပ်စာအသစ် ရပါပြီ:\n\n`{full_address}`", parse_mode=ParseMode.MARKDOWN_V2)
         except sqlite3.IntegrityError:
-            await update.message.reply_text(f"⚠️ `{username}` ဆိုတဲ့လိပ်စာက ရှိပြီးသားဖြစ်နေပါသည်။", parse_mode='Markdown')
+            await update.message.reply_text(f"⚠️ `{username}` ဆိုတဲ့လိပ်စာက ရှိပြီးသားဖြစ်နေပါသည်။", parse_mode=ParseMode.MARKDOWN_V2)
         except Exception as e:
             logger.error(f"Error in new_email: {e}")
             await update.message.reply_text("❌ အမှားအယွင်းတစ်ခု ဖြစ်ပွားပါသည်။")
@@ -129,8 +139,9 @@ async def my_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not addresses:
         await update.message.reply_text("သင်ဖန်တီးထားတဲ့ အီးမေးလ်လိပ်စာ မရှိသေးပါ။ `/new` ကိုသုံးပြီး အသစ်ဖန်တီးနိုင်ပါတယ်။"); return
 
-    message_text = "📬 **သင်၏ Email လိပ်စာများ:**\n\n" + "\n".join([f"- `{addr[0]}`" for addr in addresses])
-    await update.message.reply_text(message_text, parse_mode='Markdown')
+    escaped_addresses = [escape_markdown(f"- {addr[0]}") for addr in addresses]
+    message_text = "*📬 သင်၏ Email လိပ်စာများ:*\n\n" + "\n".join(escaped_addresses)
+    await update.message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 # --- NEW WORKFLOW: Show Email Content on Demand ---
 async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,19 +156,24 @@ async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if not email_data:
             await query.answer("❌ Email ကို ရှာမတွေ့ပါ။", show_alert=True)
-            await query.edit_message_reply_markup(reply_markup=None) # Remove button
-            return
+            await query.edit_message_reply_markup(reply_markup=None); return
 
         from_addr, subject, body, received_at_str = email_data
         received_at = datetime.fromisoformat(received_at_str).strftime('%Y-%m-%d %H:%M')
         body_text = body if body else "[Email body is empty]"
         if len(body_text) > 3800: body_text = body_text[:3800] + "\n\n[...]"
         
-        # Send the full content as a NEW message
-        message_text = f"**From:**\n`{from_addr}`\n\n**Subject:**\n`{subject}`\n\n**Received:**\n`{received_at}`\n----------------------------------------\n\n{body_text}"
-        await context.bot.send_message(chat_id=query.from_user.id, text=message_text, parse_mode='Markdown')
+        # Escape all parts of the message for MarkdownV2
+        from_addr_escaped = escape_markdown(from_addr)
+        subject_escaped = escape_markdown(subject)
+        body_escaped = escape_markdown(body_text)
+        received_at_escaped = escape_markdown(received_at)
+        separator = escape_markdown("----------------------------------------")
+
+        message_text = f"*From:*\n{from_addr_escaped}\n\n*Subject:*\n{subject_escaped}\n\n*Received:*\n{received_at_escaped}\n{separator}\n\n{body_escaped}"
         
-        # Acknowledge the button press and remove the button
+        await context.bot.send_message(chat_id=query.from_user.id, text=message_text, parse_mode=ParseMode.MARKDOWN_V2)
+        
         await query.answer("✅ Email content sent.")
         await query.edit_message_text(f"✅ Opened email from: {from_addr}", reply_markup=None)
 
@@ -165,8 +181,7 @@ async def show_email_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Error in show_email_content for email_id {query.data}: {e}", exc_info=True)
         await query.answer("❌ Email ကိုဖွင့်ရာတွင် အမှားအယွင်းဖြစ်ပွားပါသည်။", show_alert=True)
 
-
-# --- ADMIN PANEL (FIXED) ---
+# --- ADMIN PANEL ---
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     try:
@@ -178,11 +193,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cursor.execute("SELECT COUNT(*) FROM addresses")
                 email_count = cursor.fetchone()[0]
         db_size_mb = round(os.path.getsize(DB_PATH) / (1024 * 1024), 2) if os.path.exists(DB_PATH) else 0
-        text = f"👑 **Admin Panel**\n- 👥 Users: `{user_count}`\n- 📧 Emails: `{email_count}`\n- 💽 DB: `{db_size_mb} MB`"
+        text = f"*👑 Admin Panel*\n- 👥 Users: `{user_count}`\n- 📧 Emails: `{email_count}`\n- 💽 DB: `{db_size_mb} MB`"
         keyboard = [[InlineKeyboardButton("👥 User စာရင်းကြည့်ရန်", callback_data="admin:users")]]
         
-        if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-        else: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
+        else: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         logger.error(f"Error in admin_panel: {e}")
 
@@ -195,50 +210,59 @@ async def show_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cursor.execute("SELECT user_id, COUNT(id) FROM addresses GROUP BY user_id")
                 users = cursor.fetchall()
         
-        if not users:
-            text = "👥 Bot ကိုအသုံးပြုနေသူ မရှိသေးပါ။"
-        else:
-            text = "👥 **Active User List:**\n\n" + "\n".join([f"- ID: `{uid}` (Emails: {count})" for uid, count in users])
+        if not users: text = "👥 Bot ကိုအသုံးပြုနေသူ မရှိသေးပါ။"
+        else: 
+            user_lines = [escape_markdown(f"- ID: {uid} (Emails: {count})") for uid, count in users]
+            text = "*👥 Active User List:*\n\n" + "\n".join(user_lines)
         
         keyboard = [[InlineKeyboardButton("◀️ Admin Panel သို့ပြန်သွားရန်", callback_data="admin:panel")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         logger.error(f"Error in show_admin_users: {e}", exc_info=True)
         await query.answer("❌ User list ကိုပြသရာတွင် အမှားအယွင်းဖြစ်ပွားပါသည်။", show_alert=True)
 
 # --- BACKGROUND EMAIL FETCHING ---
-async def fetch_and_process_emails(application: Application):
+def _blocking_imap_check():
+    """Synchronous function to perform the blocking IMAP check."""
     try:
         with imaplib.IMAP4_SSL(IMAP_SERVER) as mail:
             mail.login(CATCH_ALL_EMAIL, CATCH_ALL_PASSWORD)
             mail.select("inbox")
-            _, messages = mail.search(None, '(UNSEEN)') # Fetch only unread emails
-            email_ids = messages[0].split()
-            if not email_ids: return
-            
-            logger.info(f"Found {len(email_ids)} new unread emails. Processing...")
-            await process_emails_in_db(application, mail, email_ids)
-            # Mark emails as read after processing
-            for mail_id in email_ids:
-                mail.store(mail_id, '+FLAGS', '\\Seen')
-    except Exception as e:
-        logger.error(f"IMAP Error: {e}")
+            _, messages = mail.search(None, '(UNSEEN)')
+            email_ids_bytes = messages[0].split()
+            if not email_ids_bytes: return []
 
-async def process_emails_in_db(application, mail, email_ids):
+            fetched_emails = []
+            for mail_id in email_ids_bytes:
+                _, msg_data = mail.fetch(mail_id, "(RFC822)")
+                fetched_emails.append(msg_data[0][1])
+                mail.store(mail_id, '+FLAGS', '\\Seen')
+            return fetched_emails
+    except Exception as e:
+        logger.error(f"Blocking IMAP check failed: {e}")
+        return []
+
+async def fetch_and_process_emails(application: Application):
+    """Asynchronous wrapper that runs the blocking IMAP check in a separate thread."""
+    raw_emails = await asyncio.to_thread(_blocking_imap_check)
+    if not raw_emails: return
+
+    logger.info(f"Found {len(raw_emails)} new emails. Processing...")
+    
     async with db_lock:
         with get_db_conn() as conn:
-            for email_id_bytes in reversed(email_ids):
+            for raw_email_data in raw_emails:
                 try:
-                    cursor = conn.cursor()
-                    _, msg_data = mail.fetch(email_id_bytes, "(RFC822)")
-                    msg = email.message_from_bytes(msg_data[0][1])
+                    msg = email.message_from_bytes(raw_email_data)
                     message_id_header = msg.get("Message-ID")
                     if not message_id_header: continue
 
+                    cursor = conn.cursor()
                     cursor.execute("SELECT id FROM emails WHERE message_id = ?", (message_id_header,))
                     if cursor.fetchone(): continue
 
-                    to_address = (email.utils.parseaddr(msg.get("To"))[1] or email.utils.parseaddr(msg.get("Delivered-To"))[1])
+                    to_address = (email.utils.parseaddr(msg.get("To"))[1] or 
+                                  email.utils.parseaddr(msg.get("Delivered-To"))[1])
                     if not to_address or YOUR_DOMAIN not in to_address: continue
                     
                     username = to_address.split('@')[0].lower()
@@ -262,19 +286,18 @@ async def process_emails_in_db(application, mail, email_ids):
                         new_db_email_id = cursor.lastrowid
                         conn.commit()
                         
-                        # Send notification with button to view content
-                        notification_text = f"📧 **{from_address}** ထံမှ စာအသစ်ရောက်ရှိပါသည်။"
+                        escaped_from = escape_markdown(from_address)
+                        notification_text = f"📧 *{escaped_from}* ထံမှ စာအသစ်ရောက်ရှိပါသည်။"
                         keyboard = [[InlineKeyboardButton("📖 စာအပြည့်အစုံဖတ်ရန်", callback_data=f"read_email:{new_db_email_id}")]]
-                        await application.bot.send_message(chat_id=user_id, text=notification_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
+                        await application.bot.send_message(chat_id=user_id, text=notification_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
                 except Exception as e:
-                    logger.error(f"Error processing single email: {e}", exc_info=True)
+                    logger.error(f"Error processing single email in DB: {e}", exc_info=True)
 
 async def background_tasks_loop(application: Application):
     logger.info("Background tasks loop started.")
     while True:
         await fetch_and_process_emails(application)
-        await asyncio.sleep(30) # Check more frequently
+        await asyncio.sleep(30)
 
 async def post_init(application: Application):
     commands = [
@@ -294,14 +317,12 @@ def main():
     start_web_server_in_thread()
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("new", new_email))
     application.add_handler(CommandHandler("myemails", my_emails))
     application.add_handler(CommandHandler("admin", admin_panel))
     
-    # Callback Handlers
     application.add_handler(CallbackQueryHandler(show_email_content, pattern=r'^read_email:'))
     application.add_handler(CallbackQueryHandler(show_admin_users, pattern=r'^admin:users'))
     application.add_handler(CallbackQueryHandler(admin_panel, pattern=r'^admin:panel'))
